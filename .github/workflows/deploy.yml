@@ -1,0 +1,107 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+env:
+  DEPLOY_ARCHIVE: deploy.tar.gz
+
+jobs:
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+
+      - name: Add EC2 host to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Create deployment archive
+        run: |
+          tar -czf "$DEPLOY_ARCHIVE" \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='.next' \
+            --exclude='__pycache__' \
+            --exclude='*.log' \
+            --exclude='.env' \
+            --exclude='.DS_Store' \
+            .
+
+      - name: Copy archive to EC2
+        run: |
+          scp "$DEPLOY_ARCHIVE" "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:${{ secrets.EC2_DEPLOY_PATH }}/$DEPLOY_ARCHIVE"
+
+      - name: Deploy on EC2
+        run: |
+          ssh "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" <<'EOF'
+            set -euo pipefail
+
+            DEPLOY_DIR="${{ secrets.EC2_DEPLOY_PATH }}"
+            ARCHIVE_NAME="$DEPLOY_ARCHIVE"
+            CURRENT_DIR="$DEPLOY_DIR/current"
+
+            mkdir -p "$DEPLOY_DIR"
+            cd "$DEPLOY_DIR"
+
+            echo "[deploy] Extracting new release..."
+            rm -rf "$CURRENT_DIR.tmp"
+            mkdir -p "$CURRENT_DIR.tmp"
+            tar -xzf "$ARCHIVE_NAME" -C "$CURRENT_DIR.tmp"
+            rm "$ARCHIVE_NAME"
+
+            # Preserve existing .env if present
+            if [ -f "$CURRENT_DIR/.env" ] && [ ! -f "$CURRENT_DIR.tmp/.env" ]; then
+              cp "$CURRENT_DIR/.env" "$CURRENT_DIR.tmp/.env"
+            fi
+
+            mv "$CURRENT_DIR.tmp" "$CURRENT_DIR"
+
+            cd "$CURRENT_DIR"
+
+            if [ ! -f .env ]; then
+              echo "[deploy] ERROR: .env file is required on the EC2 instance."
+              exit 1
+            fi
+
+            echo "[deploy] Shutting down existing containers..."
+            docker compose down || true
+
+            echo "[deploy] Pruning old images..."
+            docker image prune -f || true
+
+            echo "[deploy] Building and starting services..."
+            docker compose build --no-cache
+            docker compose up -d
+
+            echo "[deploy] Waiting for services to initialize..."
+            sleep 10
+
+            echo "[deploy] Running health checks..."
+            if ! curl -fsS http://localhost:8000/healthz; then
+              echo "[deploy] ERROR: API health check failed"
+              docker compose logs --tail=200
+              exit 1
+            fi
+
+            echo "[deploy] Deployment successful."
+            docker compose ps
+          EOF
+
+      - name: Cleanup archive
+        if: always()
+        run: rm -f "$DEPLOY_ARCHIVE"
+

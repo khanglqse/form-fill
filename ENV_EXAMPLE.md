@@ -24,7 +24,8 @@ OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 
 # Frontend
-NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+# In production, set to http://YOUR_PUBLIC_HOST_OR_IP:8000 so the browser can reach the API
+NEXT_PUBLIC_API_BASE_URL=http://47.129.209.71
 
 # API
 API_PORT=8000

@@ -1,4 +1,3 @@
-version: "3.9"
 name: formbot
 
 networks:
@@ -11,7 +10,6 @@ services:
   mongodb:
     image: mongo:6
     container_name: mongodb
-    ports: ["27017:27017"]
     volumes:
       - mongo_data:/data/db
     healthcheck:
@@ -20,6 +18,7 @@ services:
       timeout: 5s
       retries: 5
     networks: [backend]
+    restart: unless-stopped
 
   api:
     build: ./api
@@ -27,35 +26,32 @@ services:
     env_file: .env
     environment:
       MONGODB_URI: mongodb://mongodb:27017/forms
-      API_PORT: 8000
-      OPENAI_MODEL: gpt-4o-mini
-      CORS_ORIGINS: "*"
-    volumes:
-      - ./api/app:/app/app:rw
+      API_PORT: ${API_PORT:-8000}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
     depends_on:
       mongodb:
         condition: service_healthy
-    ports: ["8000:8000"]
+    ports:
+      - "8000:8000"
     networks: [backend]
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    restart: unless-stopped
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
   frontend:
-    build: 
+    build:
       context: ./frontend
-      target: dev
+      target: runner
     container_name: frontend
     env_file: .env
     environment:
-      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
-      NODE_ENV: development
-    volumes:
-      - ./frontend:/app:rw
-      - /app/node_modules
-      - /app/.next
-    ports: ["3000:3000"]
+      NODE_ENV: production
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
     depends_on: [api]
+    ports:
+      - "80:3000"
     networks: [backend]
-    command: ["npm", "run", "dev"]
+    restart: unless-stopped
 
   crawler:
     build: ./crawler
@@ -65,17 +61,14 @@ services:
       AWS_REGION: ${AWS_REGION}
       FORMS_BUCKET: ${FORMS_BUCKET}
       S3_ENDPOINT_URL: ${S3_ENDPOINT_URL}
-    volumes:
-      - ./crawler/app:/app/app:rw
     command: ["python", "-m", "app.main", "--cron=0 3 * * *"]
     networks: [backend]
+    restart: unless-stopped
 
   worker:
     build: ./worker
     container_name: worker
     env_file: .env
-    volumes:
-      - ./worker/app:/app/app:rw
     environment:
       AWS_REGION: ${AWS_REGION}
       FORMS_BUCKET: ${FORMS_BUCKET}
@@ -86,6 +79,4 @@ services:
       mongodb:
         condition: service_healthy
     networks: [backend]
-
-
-
+    restart: unless-stopped
