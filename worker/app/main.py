@@ -9,9 +9,11 @@ from pymongo import MongoClient
 try:
     # When executed as a package inside Docker: python -m app.main
     from .ocr import ocr_extract_fields
+    from .job_logger import log_job_start, log_job_success, log_job_failure
 except ImportError:
     # When executed directly: python main.py
     from ocr import ocr_extract_fields
+    from job_logger import log_job_start, log_job_success, log_job_failure
 
 
 def mongo_client():
@@ -86,22 +88,78 @@ def run_once():
         sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt)
         return
 
-    print(f"[worker] Processing s3://{event['bucket']}/{event['key']}")
-    obj = s3.get_object(Bucket=event["bucket"], Key=event["key"])
-    content = obj["Body"].read()
-
-    schema = ocr_extract_fields(content, event["key"])  # minimal extraction
-    schema.update({
-        "id": event["key"],
-        "title": os.path.basename(event["key"]) or event["key"],
-        "source": {"bucket": event["bucket"], "key": event["key"]},
-        "createdAt": int(time.time())
-    })
-    db.forms.update_one({"id": schema["id"]}, {"$set": schema}, upsert=True)
-    print(f"[worker] Upserted form schema: {schema['id']}")
-
-    sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt)
-    print("[worker] Deleted SQS message")
+    # Generate job ID
+    job_id = f"worker-{event['bucket']}-{event['key']}-{int(time.time())}"
+    job_metadata = {
+        "bucket": event["bucket"],
+        "key": event["key"],
+        "sqs_receipt_handle": receipt,
+        "queue_url": queue_url
+    }
+    
+    # Log job start
+    start_time = time.time()
+    log_job_start(
+        job_type="worker",
+        job_id=job_id,
+        metadata=job_metadata
+    )
+    
+    try:
+        print(f"[worker] Processing s3://{event['bucket']}/{event['key']}")
+        obj = s3.get_object(Bucket=event["bucket"], Key=event["key"])
+        content = obj["Body"].read()
+        
+        schema = ocr_extract_fields(content, event["key"])  # minimal extraction
+        schema.update({
+            "id": event["key"],
+            "title": os.path.basename(event["key"]) or event["key"],
+            "source": {"bucket": event["bucket"], "key": event["key"]},
+            "createdAt": int(time.time())
+        })
+        db.forms.update_one({"id": schema["id"]}, {"$set": schema}, upsert=True)
+        print(f"[worker] Upserted form schema: {schema['id']}")
+        
+        # Update metadata with form info
+        job_metadata.update({
+            "form_id": schema["id"],
+            "form_title": schema.get("title"),
+            "fields_count": len(schema.get("fields", [])),
+            "pages": schema.get("pages", 1)
+        })
+        
+        # Log job success
+        log_job_success(
+            job_type="worker",
+            job_id=job_id,
+            metadata=job_metadata,
+            start_time=start_time
+        )
+        
+        sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt)
+        print("[worker] Deleted SQS message")
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"[worker] Error processing job: {error_msg}")
+        
+        # Log job failure
+        log_job_failure(
+            job_type="worker",
+            job_id=job_id,
+            error=error_msg,
+            metadata=job_metadata,
+            start_time=start_time,
+            exception=e
+        )
+        
+        # Delete message even on failure to avoid infinite retries
+        try:
+            sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt)
+        except Exception:
+            pass
+        
+        raise
 
 
 def main():

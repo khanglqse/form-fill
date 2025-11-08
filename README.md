@@ -35,6 +35,68 @@ docker compose up -d --build
 - Frontend will be exposed on port 80, API on port 8000.
 - For HTTPS or custom domains, place a reverse proxy (e.g. Nginx, Traefik) in front.
 
+## Gold Data Partitioning
+
+The system supports time-based partitioning of gold layer data for improved performance and scalability. Gold data contains aggregated statistics from form sessions.
+
+### Creating Partitions
+
+Create partitioned collections based on session dates:
+
+```bash
+# Create monthly partitions (default)
+curl -X POST "http://localhost:8000/gold/partitions/create"
+
+# Create daily partitions
+curl -X POST "http://localhost:8000/gold/partitions/create?partition_type=daily"
+
+# Create weekly partitions
+curl -X POST "http://localhost:8000/gold/partitions/create?partition_type=weekly"
+
+# Create yearly partitions
+curl -X POST "http://localhost:8000/gold/partitions/create?partition_type=yearly"
+```
+
+### Querying Partitioned Data
+
+#### List all partitions:
+```bash
+curl "http://localhost:8000/gold/partitions"
+```
+
+#### Get data from specific partition:
+```bash
+curl "http://localhost:8000/gold/partitions/2024-11"
+```
+
+#### Query partitions by date range:
+```bash
+curl "http://localhost:8000/gold/partitions/query?start_date=2024-11-01&end_date=2024-11-30"
+```
+
+### Partition Types
+
+- **daily**: Collections named `gold_sessions_2024_11_15`
+- **weekly**: Collections named `gold_sessions_2024_W46`
+- **monthly**: Collections named `gold_sessions_2024_11` (recommended)
+- **yearly**: Collections named `gold_sessions_2024`
+
+### Testing Partitioning
+
+Run the test script to verify partitioning functionality:
+
+```bash
+cd api
+python test_partitioning.py
+```
+
+### Benefits of Partitioning
+
+1. **Performance**: Faster queries on specific time ranges
+2. **Scalability**: Distribute data across multiple collections
+3. **Maintenance**: Easier to archive old partitions
+4. **Cost Optimization**: Query only relevant partitions
+
 ## Terraform (AWS)
 - See `infra/terraform/` for S3 bucket, SQS queue, S3->SQS notification, and basic IAM.
 

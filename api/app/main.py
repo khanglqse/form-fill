@@ -90,14 +90,28 @@ try:
         aggregate_form_statistics,
         aggregate_all_forms_statistics,
         get_timeseries_data,
-        upsert_gold_data
+        upsert_gold_data,
+        create_gold_partitions_by_date,
+        get_partitioned_gold_data,
+        list_gold_partitions,
+        query_gold_partitions_by_date_range,
+        get_device_analytics,
+        get_dropoff_analysis,
+        get_hourly_engagement
     )
 except ImportError:
     from gold_aggregator import (
         aggregate_form_statistics,
         aggregate_all_forms_statistics,
         get_timeseries_data,
-        upsert_gold_data
+        upsert_gold_data,
+        create_gold_partitions_by_date,
+        get_partitioned_gold_data,
+        list_gold_partitions,
+        query_gold_partitions_by_date_range,
+        get_device_analytics,
+        get_dropoff_analysis,
+        get_hourly_engagement
     )
 
 
@@ -129,6 +143,189 @@ async def refresh_gold_data(form_id: Optional[str] = None, db=Depends(get_db)):
     """Refresh gold layer data"""
     await upsert_gold_data(db, form_id)
     return {"status": "success", "message": f"Gold data refreshed for {form_id or 'all forms'}"}
+
+
+@app.post("/gold/partitions/create")
+async def create_gold_partitions(partition_type: str = "monthly", db=Depends(get_db)):
+    """Create partitioned gold collections based on session dates
+
+    Args:
+        partition_type: Type of partitioning ('daily', 'weekly', 'monthly', 'yearly')
+    """
+    if partition_type not in ["daily", "weekly", "monthly", "yearly"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid partition_type. Must be one of: daily, weekly, monthly, yearly"
+        )
+
+    result = await create_gold_partitions_by_date(db, partition_type)
+    return result
+
+
+@app.get("/gold/partitions")
+async def get_gold_partitions_list(db=Depends(get_db)):
+    """List all available gold partitions"""
+    result = await list_gold_partitions(db)
+    return result
+
+
+@app.get("/gold/partitions/{partition_key:path}")
+async def get_gold_partition_data(partition_key: str, db=Depends(get_db)):
+    """Get gold data from a specific partition"""
+    partition_data = await get_partitioned_gold_data(db, partition_key)
+    if partition_data is None:
+        raise HTTPException(status_code=404, detail=f"Partition '{partition_key}' not found")
+    return partition_data
+
+
+@app.get("/gold/partitions/query")
+async def query_gold_partitions(start_date: str, end_date: str, db=Depends(get_db)):
+    """Query gold partitions within a date range
+
+    Args:
+        start_date: Start date in ISO format (YYYY-MM-DD)
+        end_date: End date in ISO format (YYYY-MM-DD)
+    """
+    try:
+        # Validate date format
+        from datetime import datetime
+        datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+        datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid date format. Use ISO format (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD)"
+        )
+
+    result = await query_gold_partitions_by_date_range(db, start_date, end_date)
+    return result
+
+
+@app.get("/gold/insights/device")
+async def get_device_insights(db=Depends(get_db)):
+    """Get device and platform analytics"""
+    result = await get_device_analytics(db)
+    return result
+
+
+@app.get("/gold/insights/dropoff")
+async def get_dropoff_insights(db=Depends(get_db)):
+    """Get drop-off analysis by field"""
+    result = await get_dropoff_analysis(db)
+    return result
+
+
+@app.get("/gold/insights/hourly")
+async def get_hourly_insights(db=Depends(get_db)):
+    """Get hourly engagement patterns"""
+    result = await get_hourly_engagement(db)
+    return result
+
+
+@app.get("/jobs/stats/summary")
+async def get_job_stats_summary(db=Depends(get_db)):
+    """Get job statistics summary"""
+    pipeline = [
+        {
+            "$group": {
+                "_id": {
+                    "job_type": "$job_type",
+                    "status": "$status"
+                },
+                "count": {"$sum": 1},
+                "avg_duration": {
+                    "$avg": "$duration_seconds"
+                }
+            }
+        },
+        {
+            "$group": {
+                "_id": "$_id.job_type",
+                "statuses": {
+                    "$push": {
+                        "status": "$_id.status",
+                        "count": "$count",
+                        "avg_duration": "$avg_duration"
+                    }
+                },
+                "total": {"$sum": "$count"}
+            }
+        }
+    ]
+    
+    stats = []
+    async for result in db.jobs.aggregate(pipeline):
+        stats.append({
+            "job_type": result["_id"],
+            "total": result["total"],
+            "statuses": result["statuses"]
+        })
+    
+    # Get overall stats
+    total_jobs = await db.jobs.count_documents({})
+    success_jobs = await db.jobs.count_documents({"status": "success"})
+    failed_jobs = await db.jobs.count_documents({"status": "failed"})
+    running_jobs = await db.jobs.count_documents({"status": "running"})
+    
+    return {
+        "overall": {
+            "total_jobs": total_jobs,
+            "success": success_jobs,
+            "failed": failed_jobs,
+            "running": running_jobs,
+            "success_rate": round((success_jobs / total_jobs * 100), 2) if total_jobs > 0 else 0
+        },
+        "by_type": stats
+    }
+
+
+@app.get("/jobs")
+async def get_jobs(
+    job_type: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 100,
+    skip: int = 0,
+    db=Depends(get_db)
+):
+    """Get job logs
+    
+    Args:
+        job_type: Filter by job type ('worker', 'crawler')
+        status: Filter by status ('success', 'failed', 'running')
+        limit: Maximum number of results
+        skip: Number of results to skip
+    """
+    query = {}
+    if job_type:
+        query["job_type"] = job_type
+    if status:
+        query["status"] = status
+    
+    jobs = []
+    async for job in db.jobs.find(query).sort("created_at", -1).skip(skip).limit(limit):
+        # Convert ObjectId to string
+        job["_id"] = str(job["_id"])
+        jobs.append(job)
+    
+    total = await db.jobs.count_documents(query)
+    
+    return {
+        "total": total,
+        "limit": limit,
+        "skip": skip,
+        "jobs": jobs
+    }
+
+
+@app.get("/jobs/{job_id:path}")
+async def get_job(job_id: str, db=Depends(get_db)):
+    """Get a specific job log by job_id"""
+    job = await db.jobs.find_one({"job_id": job_id})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job["_id"] = str(job["_id"])
+    return job
 
 
 # Minimal OpenAI integration (JSON response) — logic placed inline for MVP

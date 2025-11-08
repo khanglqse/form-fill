@@ -7,6 +7,13 @@ from pathlib import Path
 import boto3
 import requests
 
+try:
+    # When executed as a package inside Docker: python -m app.main
+    from .job_logger import log_job_start, log_job_success, log_job_failure
+except ImportError:
+    # When executed directly: python main.py
+    from job_logger import log_job_start, log_job_success, log_job_failure
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -53,12 +60,60 @@ def main():
     logger.info(f"Starting crawler with bucket={bucket}, endpoint={endpoint}")
 
     def run():
+        # Generate job ID
+        ts = int(time.time())
+        job_id = f"crawler-{ts}"
+        key = f"raw/topcv-{ts}.docx"
+        
+        job_metadata = {
+            "bucket": bucket,
+            "key": key,
+            "source_url": DOC_URL,
+            "endpoint": endpoint
+        }
+        
+        # Log job start
+        start_time = time.time()
+        log_job_start(
+            job_type="crawler",
+            job_id=job_id,
+            metadata=job_metadata
+        )
+        
         try:
-            ts = int(time.time())
-            key = f"raw/topcv-{ts}.docx"
             upload_doc_from_url(bucket, key, endpoint)
+            
+            # Update metadata with success info
+            job_metadata.update({
+                "status": "uploaded",
+                "s3_path": f"s3://{bucket}/{key}"
+            })
+            
+            # Log job success
+            log_job_success(
+                job_type="crawler",
+                job_id=job_id,
+                metadata=job_metadata,
+                start_time=start_time
+            )
+            
+            logger.info(f"Job {job_id} completed successfully")
+            
         except Exception as e:
-            logger.error(f"Error during run: {e}", exc_info=True)
+            error_msg = str(e)
+            logger.error(f"Error during run: {error_msg}", exc_info=True)
+            
+            # Log job failure
+            log_job_failure(
+                job_type="crawler",
+                job_id=job_id,
+                error=error_msg,
+                metadata=job_metadata,
+                start_time=start_time,
+                exception=e
+            )
+            
+            raise
 
     # Run immediately, then daily
     while True:
